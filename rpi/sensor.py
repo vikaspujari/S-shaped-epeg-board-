@@ -5,8 +5,9 @@ import json
 import time
 
 # --- CONFIGURATION ---
-# Replace with your laptop's actual IP address
-LAPTOP_IP = "192.168.1.10" # Placeholder, please update
+# Network addresses for this setup.
+LAPTOP_IP = "10.172.94.13"
+RPI_IP = "10.172.94.74"
 WS_URL = f"ws://{LAPTOP_IP}:8000/ws/rpi"
 
 # Sensors GPIO pins (BCM numbering)
@@ -72,6 +73,7 @@ if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     try:
         print("Pegboard Sensor Script Started.")
+        print(f"Raspberry Pi IP: {RPI_IP}")
         print(f"Monitoring GPIOs: {SENSOR_PINS}")
         loop.run_until_complete(send_events())
     except KeyboardInterrupt:
@@ -79,3 +81,4 @@ if __name__ == "__main__":
     finally:
         GPIO.cleanup()
         loop.close()
+

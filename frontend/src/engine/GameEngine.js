@@ -15,6 +15,30 @@ const TAU = Math.PI * 2;
 const rand = (a, b) => Math.random() * (b - a) + a;
 const clamp = (v, lo, hi) => v < lo ? lo : v > hi ? hi : v;
 
+function createNoopContext() {
+  const gradient = { addColorStop() {} };
+  return new Proxy({}, {
+    get(target, prop) {
+      if (prop in target) return target[prop];
+      if (prop === 'createLinearGradient' || prop === 'createRadialGradient') return () => gradient;
+      if (prop === 'measureText') return () => ({ width: 0 });
+      return () => {};
+    },
+    set(target, prop, value) {
+      target[prop] = value;
+      return true;
+    },
+  });
+}
+
+function get2d(canvas) {
+  try {
+    return canvas.getContext('2d') || createNoopContext();
+  } catch {
+    return createNoopContext();
+  }
+}
+
 function offscreen(w, h) {
   const c = document.createElement('canvas');
   c.width = w; c.height = h; return c;
@@ -141,7 +165,7 @@ const MC = {
 
 function drawMoonlitCommando(frame, state, breath) {
   const oc = offscreen(FW, FH);
-  const c = oc.getContext('2d');
+  const c = get2d(oc);
   const cx = FW / 2, base = FH - 8;
   const legL = 26, torH = 28, torW = 26, headR = 13;
 
@@ -328,7 +352,7 @@ function drawMoonlitCommando(frame, state, breath) {
 
   // ── RIM LIGHT (strong edge glow on right side from moonlight) ──
   const rimOc = offscreen(FW, FH);
-  const rc = rimOc.getContext('2d');
+  const rc = get2d(rimOc);
   // Shifted right + slightly down
   rc.drawImage(oc, 2, 0);
   rc.globalCompositeOperation = 'destination-out';
@@ -339,7 +363,7 @@ function drawMoonlitCommando(frame, state, breath) {
   rc.globalCompositeOperation = 'source-over';
   // Also a top rim
   const rimOc2 = offscreen(FW, FH);
-  const rc2 = rimOc2.getContext('2d');
+  const rc2 = get2d(rimOc2);
   rc2.drawImage(oc, 0, -1);
   rc2.globalCompositeOperation = 'destination-out';
   rc2.drawImage(oc, 0, 0);
@@ -348,7 +372,7 @@ function drawMoonlitCommando(frame, state, breath) {
   rc2.fillRect(0, 0, FW, FH);
   rc2.globalCompositeOperation = 'source-over';
 
-  const finalCtx = oc.getContext('2d');
+  const finalCtx = get2d(oc);
   finalCtx.drawImage(rimOc, 0, 0);
   finalCtx.drawImage(rimOc2, 0, 0);
 
@@ -424,7 +448,7 @@ class Firefly {
 export default class GameEngine {
   constructor(canvas) {
     this.canvas = canvas;
-    this.ctx = canvas.getContext('2d');
+    this.ctx = get2d(canvas);
     this.raf = null;
     this.time = 0;
     this.scrollX = 0;

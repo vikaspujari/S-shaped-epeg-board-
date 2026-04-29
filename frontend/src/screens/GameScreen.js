@@ -1,68 +1,36 @@
-import React, { useRef, useEffect, useState, useCallback } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import GameEngine from '../engine/GameEngine';
 import useWebSocket from '../hooks/useWebSocket';
-import AnalyticsScreen from '../components/AnalyticsScreen';
+import ShapeDisplay from '../components/ShapeDisplay';
+import AnalyticsPanel from '../components/AnalyticsPanel';
 
-// Difficulty → rock speed multiplier
-const SPEED_MAP = {
-  Easy: 2.5,
-  Medium: 4,
-  Hard: 6,
-  'Expert / More Reps': 7.5,
-};
+const START_URL = 'http://10.172.94.13:8000/start';
 
 export default function GameScreen() {
   const canvasRef = useRef(null);
   const engineRef = useRef(null);
   const timerRef = useRef(null);
+  const lastHandledPegRef = useRef(null);
 
   const [elapsed, setElapsed] = useState(0);
-  const [pegsDone, setPegsDone] = useState(0);
   const [isWaiting, setIsWaiting] = useState(false);
-  const [sessionSummary, setSessionSummary] = useState(null);
-  const [showAnalytics, setShowAnalytics] = useState(false);
-  const startTimeRef = useRef(null);
+  const [isStarting, setIsStarting] = useState(false);
+  const [startError, setStartError] = useState(null);
+  const [timerRunning, setTimerRunning] = useState(false);
+  const [startTimestamp, setStartTimestamp] = useState(null);
 
-  // ─── WebSocket event handler ───
-  const handleWsMessage = useCallback((msg) => {
-    const engine = engineRef.current;
-    if (!engine) return;
+  const {
+    status,
+    currentShape,
+    currentSide,
+    targetHole,
+    lastPegResult,
+    gameOver,
+    analytics,
+    shapesCompleted,
+    totalRounds,
+  } = useWebSocket();
 
-    if (msg.type === 'LIVE_UPDATE') {
-      const data = msg.data;
-
-      // Start the timer on the first peg if not started
-      if (!startTimeRef.current) {
-        startTimeRef.current = Date.now();
-      }
-
-      // Trigger jump animation (includes white flash via engine)
-      engine.triggerJump();
-      setPegsDone(data.holes_done);
-      setIsWaiting(false);
-    }
-
-    if (msg.type === 'SESSION_SUMMARY') {
-      const data = msg.data;
-
-      // Apply difficulty-based speed for next session reference
-      if (data.suggested_difficulty && SPEED_MAP[data.suggested_difficulty]) {
-        engine.setRockSpeed(SPEED_MAP[data.suggested_difficulty]);
-      }
-
-      engine.setDone();
-      setSessionSummary(data);
-
-      // Short delay before showing analytics for the final jump animation
-      setTimeout(() => {
-        setShowAnalytics(true);
-      }, 1200);
-    }
-  }, []);
-
-  const { connected } = useWebSocket(handleWsMessage);
-
-  // ─── Initialize canvas game engine ───
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -80,17 +48,20 @@ export default function GameScreen() {
     };
   }, []);
 
-  // ─── Timer tick ───
   useEffect(() => {
-    timerRef.current = setInterval(() => {
-      if (startTimeRef.current && !showAnalytics) {
-        setElapsed((Date.now() - startTimeRef.current) / 1000);
-      }
-    }, 100);
-    return () => clearInterval(timerRef.current);
-  }, [showAnalytics]);
+    if (!timerRunning || !startTimestamp) {
+      return undefined;
+    }
 
-  // ─── Track waiting state from engine ───
+    setElapsed((Date.now() - startTimestamp) / 1000);
+
+    timerRef.current = setInterval(() => {
+      setElapsed((Date.now() - startTimestamp) / 1000);
+    }, 100);
+
+    return () => clearInterval(timerRef.current);
+  }, [startTimestamp, timerRunning]);
+
   useEffect(() => {
     const interval = setInterval(() => {
       const engine = engineRef.current;
@@ -98,21 +69,49 @@ export default function GameScreen() {
         setIsWaiting(engine.state === 'waiting');
       }
     }, 100);
+
     return () => clearInterval(interval);
   }, []);
 
-  // ─── Restart ───
-  const handleRestart = useCallback(() => {
-    // Stop old engine
+  useEffect(() => {
+    if (!lastPegResult) return;
+
+    const pegKey = `${lastPegResult.correct}-${lastPegResult.hole_id}-${lastPegResult.shape}-${lastPegResult.side}-${Date.now()}`;
+    if (lastHandledPegRef.current === pegKey) return;
+    lastHandledPegRef.current = pegKey;
+
+    if (lastPegResult.correct && engineRef.current) {
+      engineRef.current.triggerJump();
+    }
+  }, [lastPegResult]);
+
+  useEffect(() => {
+    if (gameOver && engineRef.current) {
+      engineRef.current.setDone();
+    }
+    if (gameOver) {
+      setTimerRunning(false);
+    }
+  }, [gameOver]);
+
+  useEffect(() => {
+    if (currentShape && !timerRunning && !startTimestamp && shapesCompleted === 0) {
+      setElapsed(0);
+      setStartTimestamp(Date.now());
+      setTimerRunning(true);
+    }
+  }, [currentShape, shapesCompleted, startTimestamp, timerRunning]);
+
+  const startGame = useCallback(async () => {
+    setIsStarting(true);
+    setStartError(null);
+    setElapsed(0);
+    setStartTimestamp(Date.now());
+    setTimerRunning(true);
+
     if (engineRef.current) {
       engineRef.current.stop();
     }
-
-    setShowAnalytics(false);
-    setSessionSummary(null);
-    setPegsDone(0);
-    setElapsed(0);
-    startTimeRef.current = null;
 
     const canvas = canvasRef.current;
     if (canvas) {
@@ -120,25 +119,35 @@ export default function GameScreen() {
       engineRef.current = engine;
       engine.start();
     }
+
+    try {
+      const response = await fetch(START_URL, { method: 'POST' });
+      if (!response.ok) {
+        throw new Error(`Backend returned ${response.status}`);
+      }
+      await response.json();
+    } catch (error) {
+      setStartTimestamp(null);
+      setTimerRunning(false);
+      setStartError('Could not start the game. Check that the FastAPI backend is running on port 8000.');
+      console.error('[Start Game] Failed:', error);
+    } finally {
+      setIsStarting(false);
+    }
   }, []);
 
-  // ─── Format timer ───
-  const formatTime = (s) => {
-    const mins = Math.floor(s / 60);
-    const secs = Math.floor(s % 60);
-    const ms = Math.floor((s % 1) * 10);
-    return `${mins.toString().padStart(2, '0')}:${secs
-      .toString()
-      .padStart(2, '0')}.${ms}`;
+  const formatTime = (seconds) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    const tenths = Math.floor((seconds % 1) * 10);
+    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}.${tenths}`;
   };
 
   return (
     <div className="game-container" id="game-container">
       <canvas ref={canvasRef} className="game-canvas" id="game-canvas" />
 
-      {/* HUD */}
       <div className="hud">
-        {/* Timer — Top Left */}
         <div className="hud-panel hud-timer" id="hud-timer">
           <div>
             <div className="label">Mission Time</div>
@@ -146,43 +155,131 @@ export default function GameScreen() {
           </div>
         </div>
 
-        {/* Pegs — Top Right */}
         <div className="hud-panel hud-pegs" id="hud-pegs">
-          <div className="label">Objectives</div>
+          <div className="label">Round</div>
           <div className="value">
-            {pegsDone}
-            <span className="total">/8</span>
+            {shapesCompleted}
+            <span className="total">/{totalRounds}</span>
           </div>
           <div className="peg-dots">
-            {Array.from({ length: 8 }).map((_, i) => (
-              <div
-                key={i}
-                className={`peg-dot ${i < pegsDone ? 'filled' : ''}`}
-              />
+            {Array.from({ length: totalRounds }).map((_, index) => (
+              <div key={index} className={`peg-dot ${index < shapesCompleted ? 'filled' : ''}`} />
             ))}
           </div>
         </div>
       </div>
 
-      {/* Waiting indicator */}
-      {isWaiting && (
+      {currentShape ? (
+        <ShapeDisplay
+          shape={currentShape}
+          side={currentSide}
+          targetHole={targetHole}
+          lastPegResult={lastPegResult}
+        />
+      ) : (
+        !gameOver && (
+          <div className="start-panel">
+            <style>{startPanelStyles}</style>
+            <div className="start-panel-kicker">Rehab Pegboard</div>
+            <h1>Shape Match Run</h1>
+            <p>Press start, then insert each peg into the highlighted shape and side.</p>
+            <button onClick={startGame} disabled={isStarting || status !== 'CONNECTED'}>
+              {isStarting ? 'Starting...' : 'Start Game'}
+            </button>
+            {status !== 'CONNECTED' && <span className="start-panel-note">Waiting for backend WebSocket...</span>}
+            {startError && <span className="start-panel-error">{startError}</span>}
+          </div>
+        )
+      )}
+
+      {isWaiting && currentShape && !gameOver && (
         <div className="waiting-indicator" id="waiting-indicator">
-          <span>⏳ Awaiting Peg Placement…</span>
+          <span>Awaiting Peg Placement...</span>
         </div>
       )}
 
-      {/* Connection status */}
-      <div
-        className={`connection-badge ${connected ? 'connected' : 'disconnected'}`}
-        id="connection-badge"
-      >
-        {connected ? '● LINK ACTIVE' : '○ LINK DOWN'}
+      <div className={`connection-badge ${status === 'CONNECTED' ? 'connected' : 'disconnected'}`} id="connection-badge">
+        {status === 'CONNECTED' ? 'LINK ACTIVE' : 'LINK DOWN'}
       </div>
 
-      {/* Analytics overlay */}
-      {showAnalytics && (
-        <AnalyticsScreen summary={sessionSummary} onRestart={handleRestart} />
-      )}
+      {gameOver && <AnalyticsPanel analytics={analytics} onRestart={startGame} />}
     </div>
   );
 }
+
+const startPanelStyles = `
+.start-panel {
+  position: absolute;
+  z-index: 22;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(560px, 92vw);
+  padding: 30px;
+  text-align: center;
+  background: linear-gradient(145deg, rgba(8, 18, 10, 0.94), rgba(14, 42, 26, 0.84));
+  border: 1px solid rgba(51, 255, 102, 0.22);
+  border-radius: 22px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.5), 0 0 44px rgba(51, 255, 102, 0.12);
+}
+
+.start-panel-kicker {
+  font-family: var(--font-stencil);
+  color: var(--accent-amber);
+  letter-spacing: 2px;
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.start-panel h1 {
+  margin-top: 8px;
+  font-family: var(--font-stencil);
+  color: var(--accent-green);
+  font-size: clamp(34px, 7vw, 56px);
+  letter-spacing: 2px;
+  text-transform: uppercase;
+}
+
+.start-panel p {
+  margin: 10px auto 20px;
+  max-width: 420px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.start-panel button {
+  padding: 13px 42px;
+  border-radius: 999px;
+  border: 2px solid var(--accent-green);
+  background: var(--accent-green);
+  color: #041006;
+  cursor: pointer;
+  font-family: var(--font-stencil);
+  font-size: 14px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  transition: transform 0.2s ease, box-shadow 0.2s ease, opacity 0.2s ease;
+}
+
+.start-panel button:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 0 24px rgba(51, 255, 102, 0.35);
+}
+
+.start-panel button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.start-panel-note,
+.start-panel-error {
+  display: block;
+  margin-top: 12px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.start-panel-note { color: var(--text-muted); }
+.start-panel-error { color: var(--accent-red); }
+`;
+
