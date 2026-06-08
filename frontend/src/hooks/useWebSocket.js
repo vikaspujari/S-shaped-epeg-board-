@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-const WS_URL = 'ws://10.172.94.13:8000/ws/frontend';
+const WS_URL = 'ws://10.78.18.13:8000/ws/frontend';
 const RECONNECT_DELAY = 3000;
 
 const initialState = {
@@ -11,6 +11,10 @@ const initialState = {
   lastPegResult: null,
   gameOver: false,
   analytics: null,
+  aiSummary: null,
+  aiRecommendation: null,
+  aiStatus: 'idle',
+  lastSensorEvent: null,
   shapesCompleted: 0,
   totalRounds: 8,
 };
@@ -50,6 +54,9 @@ export default function useWebSocket() {
                 lastPegResult: null,
                 gameOver: false,
                 analytics: null,
+                aiSummary: null,
+                aiRecommendation: null,
+                aiStatus: 'idle',
                 shapesCompleted: message.shapes_completed ?? prev.shapesCompleted,
                 totalRounds: message.total_shapes ?? prev.totalRounds,
               };
@@ -70,6 +77,19 @@ export default function useWebSocket() {
               };
             }
 
+            if (message.type === 'sensor_event') {
+              return {
+                ...prev,
+                lastSensorEvent: {
+                  hole_id: message.hole_id,
+                  timestamp: message.timestamp,
+                  game_state: message.game_state,
+                  expected_hole: message.expected_hole,
+                  receivedAt: Date.now(),
+                },
+              };
+            }
+
             if (message.type === 'game_over') {
               return {
                 ...prev,
@@ -78,8 +98,26 @@ export default function useWebSocket() {
                 targetHole: null,
                 gameOver: true,
                 analytics: message.analytics || null,
+                aiSummary: message.analytics?.ai_recommendation || null,
+                aiRecommendation: null,
+                aiStatus: message.analytics?.ai_recommendation ? 'ready' : 'loading',
                 shapesCompleted: message.analytics?.total_rounds ?? prev.totalRounds,
                 totalRounds: message.analytics?.total_rounds ?? prev.totalRounds,
+              };
+            }
+
+            if (message.type === 'AI_SUMMARY') {
+              const recommendation = message.data?.recommendation || null;
+              const text = message.data?.text || recommendation?.summary || null;
+              const aiStatus = message.data?.status || (text ? 'ready' : 'unavailable');
+              return {
+                ...prev,
+                aiSummary: text,
+                aiRecommendation: recommendation,
+                aiStatus,
+                analytics: prev.analytics
+                  ? { ...prev.analytics, ai_recommendation: text }
+                  : prev.analytics,
               };
             }
 

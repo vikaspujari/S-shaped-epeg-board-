@@ -8,8 +8,8 @@ This repo has three pieces:
 
 ## Network Setup
 
-- Laptop/backend IP: `10.172.94.13`
-- Raspberry Pi IP: `10.172.94.74`
+- Laptop/backend IP: `10.78.18.13`
+- Raspberry Pi IP: `10.78.18.74`
 - Backend WebSocket port: `8000`
 - Frontend dev/static port: `3000`
 
@@ -52,5 +52,5 @@ python rpi/sensor.py
 ```
 
 Before starting the Pi client, confirm `LAPTOP_IP` in `rpi/sensor.py` still matches the backend machine's local network IP address.
-The current configured backend target is `ws://10.172.94.13:8000/ws/rpi`.
+The current configured backend target is `ws://10.78.18.13:8000/ws/rpi`.
 

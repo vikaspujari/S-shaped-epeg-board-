@@ -4,6 +4,10 @@ import os
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "sessions.db")
 
+def _column_exists(cursor, table: str, column: str) -> bool:
+    cursor.execute(f"PRAGMA table_info({table})")
+    return any(row[1] == column for row in cursor.fetchall())
+
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -17,20 +21,23 @@ def init_db():
             difficulty TEXT,
             suggested_difficulty TEXT,
             improvement_vs_last REAL,
-            events TEXT
+            events TEXT,
+            ai_recommendation TEXT
         )
     ''')
+    if not _column_exists(c, "sessions", "ai_recommendation"):
+        c.execute("ALTER TABLE sessions ADD COLUMN ai_recommendation TEXT")
     conn.commit()
     conn.close()
 
-def save_session(summary: dict):
+def save_session(summary: dict) -> int:
     init_db()
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''
         INSERT INTO sessions
-        (total_time, avg_time_per_hole, slowest_hole, difficulty, suggested_difficulty, improvement_vs_last, events)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        (total_time, avg_time_per_hole, slowest_hole, difficulty, suggested_difficulty, improvement_vs_last, events, ai_recommendation)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ''', (
         summary["total_time"],
         summary["avg_time"],
@@ -38,8 +45,22 @@ def save_session(summary: dict):
         summary["difficulty"],
         summary["suggested_difficulty"],
         summary["improvement_vs_last"],
-        json.dumps(summary["events"])
+        json.dumps(summary["events"]),
+        summary.get("ai_recommendation")
     ))
+    session_id = c.lastrowid
+    conn.commit()
+    conn.close()
+    return session_id
+
+def update_session_ai_recommendation(session_id: int, ai_recommendation: str):
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        "UPDATE sessions SET ai_recommendation = ? WHERE id = ?",
+        (ai_recommendation, session_id)
+    )
     conn.commit()
     conn.close()
 
@@ -61,5 +82,6 @@ def get_last_session() -> dict | None:
         "difficulty": row[5],
         "suggested_difficulty": row[6],
         "improvement_vs_last": row[7],
-        "events": json.loads(row[8]) if row[8] else []
+        "events": json.loads(row[8]) if row[8] else [],
+        "ai_recommendation": row[9] if len(row) > 9 else None
     }

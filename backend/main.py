@@ -1,14 +1,30 @@
+import asyncio
+import json
 import time
 import random
 from typing import Dict, List, Optional, Tuple
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Response, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 
 try:
+    from .ai_client import generate_session_recommendation
     from . import database
 except ImportError:
+    from ai_client import generate_session_recommendation
     import database
 
 app = FastAPI(title="Rehabilitation Pegboard Backend")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://10.78.18.13:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 SHAPE_HOLES = {
     "circle": {"holes": [1, 8], "positions": {1: "left", 8: "right"}},
@@ -38,6 +54,7 @@ class GameStateMachine:
         self.wrong_attempts = 0
         self.per_round_stats: List[Dict] = []
         self.state = "IDLE"
+        self.last_sensor_event: Optional[Dict] = None
 
     def start_game(self) -> dict:
         rounds: List[Tuple[str, int, str]] = []
@@ -230,7 +247,8 @@ manager = ConnectionManager()
 
 
 @app.post("/start")
-async def start_game():
+async def start_game(response: Response):
+    response.headers["Cache-Control"] = "no-store"
     first_payload = game.start_game()
     await manager.broadcast_frontend(first_payload)
     return {
@@ -241,25 +259,59 @@ async def start_game():
     }
 
 
+@app.get("/debug/state")
+async def debug_state():
+    return {
+        "game_state": game.state,
+        "current_shape": game.current_shape,
+        "current_hole": game.current_hole,
+        "current_side": game.current_side,
+        "shapes_completed": game.shapes_completed,
+        "frontend_connections": len(manager.active_connections),
+        "rpi_connections": len(manager.rpi_connections),
+        "last_sensor_event": game.last_sensor_event,
+    }
+
+
+@app.post("/debug/hole/{hole_id}")
+async def debug_hole(hole_id: int):
+    await process_rpi_event({
+        "hole_id": hole_id,
+        "timestamp": time.time(),
+        "source": "debug_endpoint",
+    })
+    return {
+        "sent_hole": hole_id,
+        "game_state": game.state,
+        "expected_hole": game.current_hole,
+        "shapes_completed": game.shapes_completed,
+    }
+
+
 @app.websocket("/ws/frontend")
 async def websocket_frontend(websocket: WebSocket):
     await manager.connect(websocket, "frontend")
+    print(f"[WS] Frontend connected. Total: {len(manager.active_connections)}", flush=True)
     try:
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(websocket)
+        print(f"[WS] Frontend disconnected. Total: {len(manager.active_connections)}", flush=True)
 
 
 @app.websocket("/ws/rpi")
 async def websocket_rpi(websocket: WebSocket):
     await manager.connect(websocket, "rpi")
+    print(f"[WS] RPi connected. Total: {len(manager.rpi_connections)}", flush=True)
     try:
         while True:
             data = await websocket.receive_json()
+            print(f"[RPi] Received event: {data}", flush=True)
             await process_rpi_event(data)
     except WebSocketDisconnect:
         manager.disconnect(websocket)
+        print(f"[WS] RPi disconnected. Total: {len(manager.rpi_connections)}", flush=True)
     except Exception as exc:
         print(f"Error in RPi websocket: {exc}")
         manager.disconnect(websocket)
@@ -270,6 +322,21 @@ async def process_rpi_event(data: dict):
     if hole_id is None:
         return
 
+    game.last_sensor_event = {
+        "hole_id": hole_id,
+        "timestamp": data.get("timestamp"),
+        "backend_received_at": time.time(),
+        "game_state": game.state,
+        "expected_hole": game.current_hole,
+    }
+    await manager.broadcast_frontend({
+        "type": "sensor_event",
+        "hole_id": hole_id,
+        "timestamp": data.get("timestamp"),
+        "game_state": game.state,
+        "expected_hole": game.current_hole,
+    })
+
     broadcasts = game.evaluate_peg(int(hole_id))
     for message in broadcasts:
         if message.get("type") == "ignored":
@@ -278,7 +345,35 @@ async def process_rpi_event(data: dict):
         await manager.broadcast_frontend(message)
 
         if message.get("type") == "game_over":
-            database.save_session(game.database_summary())
+            summary = game.database_summary()
+            session_id = database.save_session(summary)
+            asyncio.create_task(generate_and_broadcast_ai_summary(session_id, summary))
+
+
+async def generate_and_broadcast_ai_summary(session_id: int, summary: dict):
+    ai_summary = {
+        **summary,
+        "session_id": session_id,
+        "generated_at": time.time(),
+        "ai_request_id": f"session-{session_id}-{time.time_ns()}",
+    }
+    recommendation = await generate_session_recommendation(ai_summary)
+    if recommendation:
+        database.update_session_ai_recommendation(session_id, json_dumps(recommendation))
+
+    await manager.broadcast_frontend({
+        "type": "AI_SUMMARY",
+        "data": {
+            "session_id": session_id,
+            "recommendation": recommendation,
+            "text": recommendation.get("summary") if recommendation else None,
+            "status": "ready" if recommendation else "unavailable",
+        },
+    })
+
+
+def json_dumps(value: dict) -> str:
+    return json.dumps(value)
 
 
 if __name__ == "__main__":

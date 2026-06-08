@@ -4,7 +4,7 @@ import useWebSocket from '../hooks/useWebSocket';
 import ShapeDisplay from '../components/ShapeDisplay';
 import AnalyticsPanel from '../components/AnalyticsPanel';
 
-const START_URL = 'http://10.172.94.13:8000/start';
+const START_URL = 'http://10.78.18.13:8000/start';
 
 export default function GameScreen() {
   const canvasRef = useRef(null);
@@ -27,6 +27,10 @@ export default function GameScreen() {
     lastPegResult,
     gameOver,
     analytics,
+    aiSummary,
+    aiRecommendation,
+    aiStatus,
+    lastSensorEvent,
     shapesCompleted,
     totalRounds,
   } = useWebSocket();
@@ -121,7 +125,11 @@ export default function GameScreen() {
     }
 
     try {
-      const response = await fetch(START_URL, { method: 'POST' });
+      const response = await fetch(START_URL, {
+        method: 'POST',
+        cache: 'no-store',
+        headers: { 'Cache-Control': 'no-store' },
+      });
       if (!response.ok) {
         throw new Error(`Backend returned ${response.status}`);
       }
@@ -166,6 +174,12 @@ export default function GameScreen() {
               <div key={index} className={`peg-dot ${index < shapesCompleted ? 'filled' : ''}`} />
             ))}
           </div>
+          {lastSensorEvent && (
+            <div className="last-sensor-read">
+              H{lastSensorEvent.hole_id}
+              {lastSensorEvent.expected_hole ? ` / target H${lastSensorEvent.expected_hole}` : ''}
+            </div>
+          )}
         </div>
       </div>
 
@@ -187,6 +201,12 @@ export default function GameScreen() {
               {isStarting ? 'Starting...' : 'Start Game'}
             </button>
             {status !== 'CONNECTED' && <span className="start-panel-note">Waiting for backend WebSocket...</span>}
+            {lastSensorEvent && (
+              <span className="start-panel-note">
+                Last sensor: hole {lastSensorEvent.hole_id}
+                {lastSensorEvent.game_state !== 'AWAITING_PEG' ? ' (press Start Game first)' : ''}
+              </span>
+            )}
             {startError && <span className="start-panel-error">{startError}</span>}
           </div>
         )
@@ -202,7 +222,15 @@ export default function GameScreen() {
         {status === 'CONNECTED' ? 'LINK ACTIVE' : 'LINK DOWN'}
       </div>
 
-      {gameOver && <AnalyticsPanel analytics={analytics} onRestart={startGame} />}
+      {gameOver && (
+        <AnalyticsPanel
+          analytics={analytics}
+          aiSummary={aiSummary}
+          aiRecommendation={aiRecommendation}
+          aiStatus={aiStatus}
+          onRestart={startGame}
+        />
+      )}
     </div>
   );
 }
@@ -281,5 +309,12 @@ const startPanelStyles = `
 
 .start-panel-note { color: var(--text-muted); }
 .start-panel-error { color: var(--accent-red); }
+
+.last-sensor-read {
+  margin-top: 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--accent-amber);
+}
 `;
 

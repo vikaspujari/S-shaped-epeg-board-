@@ -1,84 +1,124 @@
-import RPi.GPIO as GPIO
 import asyncio
-import websockets
 import json
+import sys
 import time
+from queue import Empty, Queue
 
-# --- CONFIGURATION ---
-# Network addresses for this setup.
-LAPTOP_IP = "10.172.94.13"
-RPI_IP = "10.172.94.74"
-WS_URL = f"ws://{LAPTOP_IP}:8000/ws/rpi"
+import websockets
+from gpiozero import Button, Device
+from gpiozero.pins.lgpio import LGPIOFactory
 
-# Sensors GPIO pins (BCM numbering)
-SENSOR_PINS = [4, 17, 27, 22, 5, 6, 13, 19]
 
-# Mapping GPIO to Hole ID (1 to 8)
-PIN_TO_HOLE = {pin: i+1 for i, pin in enumerate(SENSOR_PINS)}
+Device.pin_factory = LGPIOFactory()
 
-# --- GPIO SETUP ---
-GPIO.setmode(GPIO.BCM)
-for pin in SENSOR_PINS:
-    # Assuming Hall sensors pull low when active (Internal pull-up)
-    GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+WINDOWS_IP = "10.78.18.13"
+RPI_IP = "10.78.18.74"
+WS_URL = f"ws://{WINDOWS_IP}:8000/ws/rpi"
 
-# Queue for sensor events to be sent via WebSocket
-event_queue = asyncio.Queue()
+# BCM pin: hole_id
+PEG_PINS = {
+    4: 1,
+    17: 2,
+    27: 3,
+    22: 4,
+    23: 5,
+    24: 6,
+    25: 7,
+    5: 8,
+}
 
-def sensor_callback(pin):
-    """Callback for GPIO event detection."""
-    # Note: Hall sensors might flicker, add additional checks if needed
-    hole_id = PIN_TO_HOLE.get(pin)
+peg_events = Queue()
+buttons = {}
+last_sent_by_hole = {}
+
+
+def queue_event(hole_id, source):
     timestamp = time.time()
-    
-    # Put event in queue for async processing
-    # Use call_soon_threadsafe because GPIO callbacks run in separate threads
-    loop.call_soon_threadsafe(event_queue.put_nowait, {
-        "hole_id": hole_id,
-        "timestamp": timestamp
-    })
+    last_sent = last_sent_by_hole.get(hole_id, 0)
+    if timestamp - last_sent < 0.25:
+        return
 
-# Add event detection to all pins with 50ms debounce
-for pin in SENSOR_PINS:
-    # Detect falling edge (sensor triggered / magnet present)
-    GPIO.add_event_detect(pin, GPIO.FALLING, callback=sensor_callback, bouncetime=50)
+    last_sent_by_hole[hole_id] = timestamp
+    event = {
+        "hole_id": hole_id,
+        "timestamp": timestamp,
+        "source": source,
+    }
+    peg_events.put(event)
+    print(f"Hole {hole_id} triggered via {source}", flush=True)
+
+
+def make_callback(hole_id):
+    def cb():
+        queue_event(hole_id, "gpiozero")
+
+    return cb
+
+
+for bcm_pin, hole_id in PEG_PINS.items():
+    try:
+        button = Button(bcm_pin, pull_up=True, bounce_time=0.2)
+        button.when_pressed = make_callback(hole_id)
+        buttons[bcm_pin] = button
+        initial_state = "active" if button.is_pressed else "inactive"
+        print(f"OK: hole {hole_id} on BCM {bcm_pin} ({initial_state})", flush=True)
+    except Exception as exc:
+        print(f"WARN: hole {hole_id} BCM {bcm_pin} skipped: {exc}", flush=True)
+
+if not buttons:
+    print("WARN: no GPIO buttons were initialized.", flush=True)
+    print("Stop any other peg sender/sensor process using these GPIO pins, then restart this script.", flush=True)
+    sys.exit(1)
+
 
 async def send_events():
-    """WebSocket client with auto-reconnect."""
     while True:
         try:
             print(f"Connecting to {WS_URL}...")
             async with websockets.connect(WS_URL) as websocket:
-                print("Connected to backend!")
+                print(f"Connected to {WS_URL}")
                 while True:
-                    # Wait for an event from the queue
-                    event = await event_queue.get()
-                    
                     try:
-                        # Send to backend
+                        event = peg_events.get_nowait()
+                    except Empty:
+                        await asyncio.sleep(0.03)
+                        continue
+
+                    try:
                         await websocket.send(json.dumps(event))
-                        print(f"Sent: Hole {event['hole_id']} at {event['timestamp']}")
-                        event_queue.task_done()
-                    except (websockets.ConnectionClosed, Exception) as e:
-                        print(f"Send failed, re-queueing event: {e}")
-                        # If send fails, put it back or handle accordingly
-                        # For simplicity, we just log and try to reconnect
-                        await event_queue.put(event)
-                        raise # Break to outer reconnect loop
-        except (websockets.ConnectionClosed, ConnectionRefusedError, Exception) as e:
-            print(f"WebSocket Error: {e}. Retrying in 5 seconds...")
-            await asyncio.sleep(5)
+                        print(f"Sent: {event}")
+                    except Exception:
+                        peg_events.put(event)
+                        raise
+        except Exception as exc:
+            print(f"Connection failed: {exc}. Retrying in 3s...")
+            await asyncio.sleep(3)
+
+
+async def poll_sensors():
+    previous_states = {pin: button.is_pressed for pin, button in buttons.items()}
+    while True:
+        for pin, button in buttons.items():
+            is_pressed = button.is_pressed
+            if is_pressed != previous_states[pin]:
+                state = "active" if is_pressed else "inactive"
+                print(f"BCM {pin} / hole {PEG_PINS[pin]} changed to {state}", flush=True)
+                if is_pressed:
+                    queue_event(PEG_PINS[pin], "poll")
+            previous_states[pin] = is_pressed
+        await asyncio.sleep(0.05)
+
+
+async def main():
+    await asyncio.gather(send_events(), poll_sensors())
+
 
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
+    print("Pegboard Sensor Script Started.")
+    print(f"Raspberry Pi IP: {RPI_IP}")
+    print(f"Backend WebSocket: {WS_URL}")
+    print(f"Monitoring GPIOs: {sorted(PEG_PINS)}")
     try:
-        print("Pegboard Sensor Script Started.")
-        print(f"Raspberry Pi IP: {RPI_IP}")
-        print(f"Monitoring GPIOs: {SENSOR_PINS}")
-        loop.run_until_complete(send_events())
+        asyncio.run(main())
     except KeyboardInterrupt:
-        print("Shutting down...")
-    finally:
-        GPIO.cleanup()
-        loop.close()
-
+        print("Stopped.")

@@ -38,13 +38,111 @@ function getRecommendation(level, analytics) {
   return 'Reduce difficulty for the next session';
 }
 
-export default function AnalyticsPanel({ analytics, onRestart }) {
+function titleCase(value) {
+  return String(value || 'N/A').replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function formatRound(round) {
+  if (!round) return 'N/A';
+  return `${titleCase(round.shape)} ${titleCase(round.side)} (${formatSeconds(round.time_taken)})`;
+}
+
+function hydrateRound(summaryRound, perRound) {
+  if (!summaryRound) return null;
+  const matchingRound = perRound.find((row) => isSameRound(row, summaryRound));
+  return { ...summaryRound, ...matchingRound };
+}
+
+function isUsableAi(ai) {
+  return Boolean(
+    ai &&
+      typeof ai.summary === 'string' &&
+      ai.summary.trim().length > 20 &&
+      !ai.summary.trim().startsWith('{') &&
+      !ai.summary.includes('"summary"')
+  );
+}
+
+function buildAnalyticsCoaching(analytics, perRound, totalTime, currentLevel, recommendation) {
+  const slowest = hydrateRound(analytics.slowest_round, perRound) || perRound.reduce((max, row) => (
+    Number(row.time_taken || 0) > Number(max?.time_taken || 0) ? row : max
+  ), null);
+  const fastest = hydrateRound(analytics.fastest_round, perRound) || perRound.reduce((min, row) => (
+    !min || Number(row.time_taken || 0) < Number(min.time_taken || 0) ? row : min
+  ), null);
+  const mostErrors = perRound.reduce((max, row) => (
+    Number(row.wrong_attempts || 0) > Number(max?.wrong_attempts || 0) ? row : max
+  ), null);
+  const totalErrors = perRound.reduce((sum, row) => sum + Number(row.wrong_attempts || 0), 0);
+  const slowLabel = formatRound(slowest);
+  const fastLabel = formatRound(fastest);
+  const errorLabel = mostErrors && Number(mostErrors.wrong_attempts || 0) > 0
+    ? `${titleCase(mostErrors.shape)} ${titleCase(mostErrors.side)} with ${mostErrors.wrong_attempts} wrong attempt${Number(mostErrors.wrong_attempts) === 1 ? '' : 's'}`
+    : 'no major accuracy errors';
+
+  return {
+    summary: `Completed ${perRound.length} rounds in ${formatSeconds(totalTime)} at ${currentLevel} level. Fastest was ${fastLabel}; slowest was ${slowLabel}.`,
+    focus: slowest
+      ? `Prioritize ${titleCase(slowest.shape)} on the ${slowest.side} side at hole ${slowest.hole_id || 'N/A'}; it took ${formatSeconds(slowest.time_taken)} and is the clearest pacing target.`
+      : 'Repeat the slowest shape-side pattern with steady pacing.',
+    tips: [
+      {
+        area: 'Pacing',
+        recommendation: slowest
+          ? `Do 3 controlled repeats of ${titleCase(slowest.shape)} ${slowest.side}, aiming below ${formatSeconds(Math.max(Number(slowest.time_taken || 0) * 0.9, 1))}.`
+          : 'Do 3 controlled repeats of the slowest target.',
+        reason: 'This directly trains the movement that cost the most time.',
+      },
+      {
+        area: 'Accuracy',
+        recommendation: totalErrors > 0
+          ? `Before placing each peg, pause briefly to confirm the side and hole; biggest error point was ${errorLabel}.`
+          : 'Keep the same accuracy routine and gradually reduce hesitation between shape display and peg placement.',
+        reason: totalErrors > 0 ? 'Reducing wrong attempts will lower total time faster than rushing.' : 'Accuracy is stable, so the next gain should come from smoother transitions.',
+      },
+    ],
+    next_step: {
+      difficulty: currentLevel,
+      why: recommendation,
+    },
+  };
+}
+
+function getStructuredAi(aiRecommendation, aiSummary, fallbackCoaching) {
+  if (aiRecommendation && typeof aiRecommendation === 'object') {
+    return isUsableAi(aiRecommendation) ? aiRecommendation : fallbackCoaching;
+  }
+
+  if (typeof aiSummary === 'string') {
+    try {
+      const parsed = JSON.parse(aiSummary);
+      if (parsed && typeof parsed === 'object') {
+        return isUsableAi(parsed) ? parsed : fallbackCoaching;
+      }
+    } catch {
+      // Older sessions may store a plain text AI note.
+    }
+  }
+
+  const trimmedSummary = typeof aiSummary === 'string' ? aiSummary.trim() : '';
+  return trimmedSummary && !trimmedSummary.startsWith('{') && !trimmedSummary.includes('"summary"')
+    ? {
+        ...fallbackCoaching,
+        summary: trimmedSummary,
+      }
+    : fallbackCoaching;
+}
+
+export default function AnalyticsPanel({ analytics, aiSummary, aiRecommendation, aiStatus, onRestart }) {
   if (!analytics) return null;
 
   const perRound = analytics.per_round || [];
   const totalTime = getTotalTime(analytics, perRound);
   const currentLevel = getLevel(totalTime, analytics);
   const recommendation = getRecommendation(currentLevel, analytics);
+  const fallbackCoaching = buildAnalyticsCoaching(analytics, perRound, totalTime, currentLevel, recommendation);
+  const structuredAi = getStructuredAi(aiRecommendation, aiSummary, fallbackCoaching);
+  const aiTips = Array.isArray(structuredAi?.tips) ? structuredAi.tips : [];
 
   return (
     <div className="analytics-panel-overlay">
@@ -102,6 +200,59 @@ export default function AnalyticsPanel({ analytics, onRestart }) {
         <div className="difficulty-recommendation">
           <span>Difficulty Recommendation</span>
           <strong>{recommendation}</strong>
+        </div>
+
+        <div className={`ai-recommendation ai-${aiStatus || 'idle'}`}>
+          <div className="ai-section-title">AI Coaching</div>
+          {aiStatus === 'loading' ? (
+            <strong>Generating personalized session guidance...</strong>
+          ) : structuredAi ? (
+            <>
+              <div className="ai-coaching-grid">
+                <div>
+                  <span>Session Read</span>
+                  <p>{structuredAi.summary || aiSummary}</p>
+                </div>
+                <div>
+                  <span>Focus Area</span>
+                  <p>{structuredAi.focus || 'Use the slowest row below as the next repeat target.'}</p>
+                </div>
+                <div>
+                  <span>Next Step</span>
+                  <p>
+                    <strong>{structuredAi.next_step?.difficulty || currentLevel}</strong>
+                    {' - '}
+                    {structuredAi.next_step?.why || recommendation}
+                  </p>
+                </div>
+              </div>
+
+              {aiTips.length > 0 && (
+                <div className="ai-tips-wrap">
+                  <table className="ai-tips-table">
+                    <thead>
+                      <tr>
+                        <th>Area</th>
+                        <th>Recommendation</th>
+                        <th>Why</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {aiTips.map((tip, index) => (
+                        <tr key={`${tip.area || 'tip'}-${index}`}>
+                          <td>{tip.area || 'Practice'}</td>
+                          <td>{tip.recommendation || 'Repeat the target shape with steady pace.'}</td>
+                          <td>{tip.reason || 'Builds consistency across attempts.'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </>
+          ) : (
+            <strong>AI coaching is unavailable for this session.</strong>
+          )}
         </div>
 
         <div className="analytics-table-wrap">
@@ -263,6 +414,104 @@ const styles = `
   background: linear-gradient(135deg, rgba(51, 255, 102, 0.08), rgba(245, 158, 11, 0.06));
 }
 
+.ai-recommendation {
+  margin-bottom: 16px;
+  padding: 16px;
+  border-radius: 14px;
+  border: 1px solid rgba(73, 190, 255, 0.22);
+  background: linear-gradient(135deg, rgba(73, 190, 255, 0.09), rgba(51, 255, 102, 0.05));
+}
+
+.ai-section-title,
+.ai-recommendation span,
+.ai-tips-table th {
+  display: block;
+  margin-bottom: 7px;
+  font-family: var(--font-stencil);
+  font-size: 10px;
+  color: var(--text-muted);
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+}
+
+.ai-section-title {
+  color: #78d9ff;
+  font-size: 11px;
+}
+
+.ai-recommendation strong,
+.ai-recommendation p {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 15px;
+  line-height: 1.55;
+  color: var(--text-primary);
+}
+
+.ai-coaching-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.ai-coaching-grid > div {
+  min-height: 128px;
+  padding: 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(73, 190, 255, 0.16);
+  background: rgba(3, 18, 20, 0.46);
+}
+
+.ai-coaching-grid p {
+  overflow-wrap: anywhere;
+}
+
+.ai-tips-wrap {
+  margin-top: 12px;
+  overflow-x: auto;
+  border-radius: 12px;
+  border: 1px solid rgba(73, 190, 255, 0.16);
+}
+
+.ai-tips-table {
+  width: 100%;
+  min-width: 720px;
+  border-collapse: collapse;
+  background: rgba(0, 0, 0, 0.16);
+}
+
+.ai-tips-table th,
+.ai-tips-table td {
+  padding: 12px 14px;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid rgba(224, 245, 232, 0.08);
+}
+
+.ai-tips-table th {
+  display: table-cell;
+  color: #78d9ff;
+}
+
+.ai-tips-table td {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--text-primary);
+}
+
+.ai-tips-table td:first-child {
+  width: 150px;
+  color: #b9ffd0;
+  text-transform: capitalize;
+}
+
+.ai-unavailable {
+  border-color: rgba(224, 245, 232, 0.12);
+  background: rgba(224, 245, 232, 0.05);
+}
+
 .difficulty-recommendation strong {
   display: block;
   font-size: 18px;
@@ -343,6 +592,7 @@ const styles = `
   .analytics-panel-overlay { padding: 14px; }
   .analytics-panel { padding: 18px; }
   .analytics-summary-grid,
-  .analytics-highlights { grid-template-columns: 1fr; }
+  .analytics-highlights,
+  .ai-coaching-grid { grid-template-columns: 1fr; }
 }
 `;
