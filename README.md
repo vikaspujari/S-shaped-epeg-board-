@@ -99,7 +99,7 @@ S-shaped-epeg-board-/
 ## Quick Start
 
 ### 1. Backend (run on laptop or RPi)
-```bash
+
 cd backend
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
